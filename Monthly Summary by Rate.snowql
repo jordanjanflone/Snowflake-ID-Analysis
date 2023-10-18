@@ -1,0 +1,40 @@
+
+
+with intervals as(
+                select  to_timestamp(to_char(interval_meter_date,'MM/DD/YYYY') || ' ' || interval_period_start_time) as datetime,
+                interval_meter_id as meter,
+                mem.mbrsep as account,
+                mem.rate,
+                interval_meter_value as kwh
+        from MDM.SWSV_INTERVAL_METER_F int
+        inner join MDM.SV_INTERVAL_PERIOD_D p
+        on int.interval_meter_period_id = p.interval_period_id and 
+           int.interval_meter_period_duration = p.interval_period_duration
+
+        inner join CA.SWSV_METERDETL met
+        on int.interval_meter_id = met.meter
+
+        left join CA.SWSV_MEMBERDETL mem
+        on  met.mbrsep = mem.mbrsep
+        inner join CA.SWSV_METERHISTDETL hist
+        on int.interval_meter_id = hist.meter
+        where interval_meter_attribute_id = 35 and
+               islatesthist='Y' and 
+               not contains(interval_period_start_time,'DST') and 
+               (interval_meter_date>='6/1/2021' and 
+               interval_meter_date<='7/31/2022') and
+               (rate = 1 or rate = 2 or rate = 9)
+)
+
+
+select 
+    EXTRACT(YEAR FROM datetime) AS year,
+    EXTRACT(MONTH FROM datetime) AS month,
+    RATE,
+    COUNT(DISTINCT meter) AS num_meters,
+    COUNT(DISTINCT account) AS num_accounts,
+    AVG(kWh) AS avg_kWh,
+    SUM(kWh) AS total_kWh
+from intervals
+group by year, month, rate
+order by rate asc, year asc, month asc;

@@ -1,0 +1,105 @@
+
+
+with intervals as(
+                select  to_timestamp(to_char(interval_meter_date,'MM/DD/YYYY') || ' ' || interval_period_start_time) as datetime,
+                interval_meter_id as meter,
+                mem.mbrsep as account,
+                mem.rate,
+                interval_meter_value as kwh
+        from MDM.SWSV_INTERVAL_METER_F int
+        inner join MDM.SV_INTERVAL_PERIOD_D p
+        on int.interval_meter_period_id = p.interval_period_id and 
+           int.interval_meter_period_duration = p.interval_period_duration
+
+        inner join CA.SWSV_METERDETL met
+        on int.interval_meter_id = met.meter
+
+        left join CA.SWSV_MEMBERDETL mem
+        on  met.mbrsep = mem.mbrsep
+        inner join CA.SWSV_METERHISTDETL hist
+        on int.interval_meter_id = hist.meter
+        where interval_meter_attribute_id = 35 and
+               islatesthist='Y' and 
+               not contains(interval_period_start_time,'DST') and 
+               (interval_meter_date>='6/1/2021' and 
+               interval_meter_date<='7/31/2022') and
+               (rate = 1 or rate = 2 or rate = 9)
+),
+
+billing_units as(
+                select
+                date_trunc('hour', datetime) as datetime,
+                date(datetime) as date,
+                EXTRACT(YEAR FROM datetime) AS year,
+                EXTRACT(MONTH FROM datetime) AS month,
+                EXTRACT(DAY from datetime) as day,
+                EXTRACT(hour from datetime) as hour,
+
+                case when (month between 5 and 9 and hour between 15 and 19) or
+                        ((month between 11 and 12 or month between 3 and 4) and hour between 6 and 9
+                        or hour between 15 and 19) or
+                        ((month = 12 or month between 1 and 2) and hour between 6 and 9) and
+                        date not in ('2022-01-01', '2022-05-30', '2022-07-04', '2021-09-06', '2021-11-25', '2021-12-25')
+                    then 1
+                    else 0
+                end as on_peak,
+
+                case when (month between 4 and 10 and hour between 15 and 17) or
+                        ((month between 11 and 12 or month between 1 and 3) and
+                        hour between 6 and 8)
+                    then 1 
+                    else 0
+                end as three_part_op,
+
+                case when (hour = 0 or hour between 0 and 5)
+                    then 1
+                    else 0
+                end as ev_window,
+
+                rate,
+                account,
+                kWh
+                from intervals
+),
+
+meter_summary as(
+    select 
+      account, year, month, rate, 
+      count(account) AS num_obs,
+      sum(case when on_peak = 1 then kwh else 0 end) as on_peak_kwh,
+      sum(case when on_peak = 0 then kwh else 0 end) as off_peak_kwh,
+      max(case when on_peak = 1 then kwh else 0 end) as on_peak_kW,
+      max(case when on_peak = 0 then kwh else 0 end) as off_peak_kW,
+      sum(case when three_part_op = 1 then kwh else 0 end) as three_part_on_peak_kWh,
+      sum(case when three_part_op = 0 then kwh else 0 end) as three_part_off_peak_kWh,
+      max(case when three_part_op = 1 then kwh else 0 end) as three_part_on_peak_kW,
+      max(case when three_part_op = 0 then kwh else 0 end) as three_part_off_peak_kW,
+      sum(case when ev_window = 1 then kwh else 0 end) as ev_window_on_kWh,
+      sum(case when ev_window = 0 then kwh else 0 end) as ev_window_off_kWh
+    from billing_units
+group by account, year, month, rate
+order by account, year asc, month asc, rate
+),
+
+rate_summary as(
+    select year, month, rate,
+        count(distinct account) as num_accounts,
+        sum(on_peak_kWh) as on_peak_kWh,
+        sum(off_peak_kWh) as off_peak_kWh,
+        sum(on_peak_kW) as on_peak_DMD,
+        sum(off_peak_kW) as off_peak_DMD,
+        sum(three_part_on_peak_kWh) as three_part_on_kWh,
+        sum(three_part_off_peak_kWh) as three_part_off_kWh,
+        sum(three_part_on_peak_kW) as three_part_on_DMD,
+        sum(three_part_off_peak_kWh) as three_part_off_DMD,
+        sum(ev_window_on_kWh) as EV_window_on_kWh,
+        sum(ev_window_off_kWh) as EV_window_off_kWh
+    from meter_summary
+group by year, month, rate
+order by rate asc, year asc, month asc
+)
+
+select * from rate_summary;
+
+
+

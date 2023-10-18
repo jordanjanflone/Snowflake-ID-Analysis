@@ -1,0 +1,128 @@
+
+
+with intervals as(
+                select to_timestamp(to_char(interval_meter_date,'MM/DD/YYYY') || ' ' || interval_period_start_time) as datetime,
+                    to_timestamp(to_char(interval_meter_date,'MM/DD/YYYY')) as date,
+                    interval_meter_id as meter,
+                    mem.mbrsep as account,
+                    mem.rate,
+                    interval_meter_value as kwh
+                from MDM.SWSV_INTERVAL_METER_F int
+        
+                inner join MDM.SV_INTERVAL_PERIOD_D p
+                on int.interval_meter_period_id = p.interval_period_id and 
+                int.interval_meter_period_duration = p.interval_period_duration
+
+                inner join CA.SWSV_METERDETL met
+                on int.interval_meter_id = met.meter
+
+                left join CA.SWSV_MEMBERDETL mem
+                on  met.mbrsep = mem.mbrsep
+                inner join CA.SWSV_METERHISTDETL hist
+                on int.interval_meter_id = hist.meter
+                    where interval_meter_attribute_id = 35 and
+                   islatesthist='Y' and 
+                   not contains(interval_period_start_time,'DST') and 
+                   (interval_meter_date>='6/1/2021' and 
+                   interval_meter_date<='7/31/2022') and
+                   (mem.rate = 1 or mem.rate = 2 or mem.rate = 9)
+),
+
+     billinfo as(
+               select cast(billdate as int) + 20000000 as billdate2,
+               to_char(billdate2) as billdate3,
+               substr(billdate3, 1, 4) as billyear,
+               substr(billdate3, 5, 2) as billmonth,
+               substr(billdate3, 7, 2) as billday,
+               TO_CHAR(billmonth) || '/' || TO_CHAR(billday) || '/' || TO_CHAR(billyear) as date_str,
+               to_date(date_str, 'MM/DD/YYYY') as date_val,
+               bd.kwh as billed_kwh,
+               bd.mbrsep as account,
+               lag(date_val, 1) over (partition by bd.mbrsep order by bd.mbrsep, date_val) as lag_date_val 
+        from ca.swsv_billhistdetl bd
+),
+
+     billdata as(
+               select * from billinfo
+               where account not in(
+                   select account
+                   from billinfo
+                   group by account
+                   having count(*) < 6
+               )
+),
+
+     combined as(
+               select int.*,
+               bd.date_val,
+               bd.lag_date_val,
+               bd.billed_kwh,
+               bd.billyear,
+               bd.billmonth
+            from intervals int
+            
+            left join billdata bd
+            on int.account = bd.account and
+            int.date < bd.date_val and
+            int.date >= bd.lag_date_val
+            where bd.lag_date_val is not null
+),
+
+     billcomp as(
+               select 
+                account, billyear, billmonth,
+                count(account) as num_obs,
+                max(billed_kwh) as billed_kwh,
+                max(rate) as rate,
+                sum(kWh) as int_kWh
+               from combined
+                where (billyear = 2021 and billmonth between 6 and 12) 
+                or (billyear = 2022 and billmonth between 1 and 7) 
+               group by account, billyear, billmonth, billed_kwh
+               order by account, billyear asc, billmonth asc
+),
+
+     billcomp2 as(
+                select account,
+                 max(rate) as rate,
+                 sum(int_kwh) as int_kwh,
+                 sum(billed_kwh) as billed_kwh
+                from billcomp
+                group by account
+),
+
+     bc3 as(
+          select account,
+           int_kwh - billed_kwh as kwh_diff,
+            case when int_kwh = 0 or (billed_kwh < 100 and int_kWh < 100) then 0
+             else (kwh_diff/int_kwh)
+            end as pct_diff 
+          from billcomp2
+          group by account, int_kwh, billed_kwh
+),
+
+     good_accts as(
+                 select account
+                  from bc3
+                  where pct_diff between -0.05 and 0.05
+),
+
+     good_accts2 as(
+                  select bc.*
+                  from billcomp bc
+                  right join good_accts ga
+                   on bc.account = ga.account
+),   
+     
+     bc_summary as(
+                 select rate, billyear, billmonth,
+                  count(account) as num_accounts,
+                  sum(billed_kwh) as billed_kwh,
+                  sum(int_kwh) as int_kwh
+                 from good_accts2
+                 group by billyear, billmonth, rate
+                 order by rate asc, billyear asc, billmonth asc
+)
+
+select * from bc_summary;
+
